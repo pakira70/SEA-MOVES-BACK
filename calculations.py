@@ -1,7 +1,7 @@
-# calculations.py - CLEAN VERSION - Oct 2023 (or date relevant to generation)
+# calculations.py - Updated for Proportional Balancing on ALL Changes
 
 import numpy as np
-# import pandas as pd # Optional: Keep if needed elsewhere, remove if not
+# import pandas as pd # Optional
 
 # --- Constants ---
 MODES = ["Drive", "Light Rail", "Bus", "Drop-off", "Walk", "Carpool", "Vanpool", "Bike"]
@@ -9,23 +9,19 @@ BASELINE_MODE_SHARES = {
     "Drive": 71.0, "Light Rail": 10.0, "Bus": 9.0, "Drop-off": 5.0,
     "Walk": 2.0, "Carpool": 1.0, "Vanpool": 1.0, "Bike": 1.0
 }
-# Parking demand factor PER PERSON using that mode
 PARKING_DEMAND_FACTORS_PER_PERSON = {
-    "Drive": 1.0,
-    "Carpool": 0.5,
-    "Vanpool": 0.25
+    "Drive": 1.0, "Carpool": 0.5, "Vanpool": 0.25
 }
 DAYS_PER_YEAR = 365.0
-DRIVE_KEY = "Drive" # Constant for the Drive mode key
+DRIVE_KEY = "Drive"
 
 
-# --- Normalization and Balancing Function ---
-# This is the primary function called by app.py now
+# --- Normalization and Balancing Function (MODIFIED) ---
 def normalize_and_balance_shares(input_shares, changed_mode=None, new_value=None):
     """
-    Normalizes shares ensuring Drive + Sum(NonDrive) = 100.
-    If changed_mode and new_value are provided, it applies redistribution rules
-    prioritizing Drive interaction before final balancing and normalization.
+    Normalizes shares ensuring sum = 100.
+    If changed_mode and new_value are provided, it applies proportional
+    redistribution based on the change delta before final balancing.
 
     Args:
         input_shares (dict): Raw input shares (can have strings or numbers).
@@ -36,10 +32,9 @@ def normalize_and_balance_shares(input_shares, changed_mode=None, new_value=None
         dict: Fully normalized and balanced dictionary with numeric shares summing to 100.
     """
     # Step 1: Initialize and clean inputs to numeric, non-negative floats
-    # Creates working_shares (cleaned numbers) and original_numeric_shares
     working_shares = {}
     original_numeric_shares = {}
-    current_input_sum = 0.0 # Track sum of initial numeric values for edge cases
+    current_input_sum = 0.0
     for mode in MODES:
         raw_value = input_shares.get(mode, 0.0)
         num_value = 0.0
@@ -52,13 +47,12 @@ def normalize_and_balance_shares(input_shares, changed_mode=None, new_value=None
         original_numeric_shares[mode] = clean_value
         current_input_sum += clean_value
 
-    # Handle case where initial sum is zero (cannot proceed)
+    # Handle case where initial sum is zero
     if current_input_sum <= 1e-9:
         print("Warning: Initial sum of shares is zero. Returning baseline.")
         return BASELINE_MODE_SHARES.copy()
 
-    # If initial sum is not 100, normalize original_numeric_shares for proportion calculation later
-    # This prevents issues if the input dict didn't sum to 100 initially
+    # Normalize original_numeric_shares if needed (for proportion calculation)
     if abs(current_input_sum - 100.0) > 1e-7:
         factor = 100.0 / current_input_sum
         for mode in original_numeric_shares:
@@ -71,112 +65,96 @@ def normalize_and_balance_shares(input_shares, changed_mode=None, new_value=None
     is_change_valid = False
     if changed_mode and changed_mode in working_shares and new_value is not None:
         try:
+            # Clamp target value between 0 and 100
             target_value = max(0.0, min(100.0, float(new_value)))
-            # Calculate delta based on the cleaned initial numeric value
+            # Calculate delta based on the cleaned & potentially normalized original value
             delta = target_value - original_numeric_shares.get(changed_mode, 0.0)
-            is_change_valid = True
+            # Only consider it a valid change if the delta is significant
+            if abs(delta) > 1e-9:
+                is_change_valid = True
+            else:
+                # If delta is effectively zero, treat as no change for redistribution
+                changed_mode = None # Prevent Step 3 redistribution
+                # Set the working share to the target value anyway for final balancing
+                working_shares[changed_mode] = target_value
+
         except (ValueError, TypeError):
             print(f"Warning: Invalid new value '{new_value}' for {changed_mode}. No redistribution applied.")
-            # If value is invalid, we won't apply specific redistribution
+            # If value is invalid, don't apply specific redistribution
+            changed_mode = None # Prevent Step 3 redistribution
 
-    # Step 3: Apply Redistribution Logic OR Simple Balancing
 
-    if is_change_valid and abs(delta) > 1e-9:
-        # --- A specific mode was validly changed ---
-        working_shares[changed_mode] = target_value # Apply the change
+    # Step 3: Apply Proportional Redistribution Logic (If Valid Change Occurred)
+    if is_change_valid: # is_change_valid is now true only if delta is significant
+        working_shares[changed_mode] = target_value # Apply the primary change
 
-        if changed_mode == DRIVE_KEY:
-            # --- Drive Changed ---
-            if delta > 0: # Drive Increased -> Reduce others proportionally
-                # Use normalized original shares for proportions
-                other_sum_before_change = sum(v for k, v in original_numeric_shares.items() if k != DRIVE_KEY)
-                if other_sum_before_change > 1e-9:
-                    reduction_factor = delta / other_sum_before_change
-                    for k in working_shares:
-                        if k != DRIVE_KEY:
-                             reduction = original_numeric_shares[k] * reduction_factor
-                             working_shares[k] = max(0.0, original_numeric_shares[k] - reduction) # Clamp at 0
-            else: # Drive Decreased (delta < 0) -> Increase others proportionally
-                other_sum_before_change = sum(v for k, v in original_numeric_shares.items() if k != DRIVE_KEY)
-                if other_sum_before_change > 1e-9:
-                    increase_amount = abs(delta)
-                    increase_factor = increase_amount / other_sum_before_change
-                    for k in working_shares:
-                        if k != DRIVE_KEY:
-                            working_shares[k] = min(100.0, original_numeric_shares[k] * (1.0 + increase_factor)) # Clamp at 100
+        # Calculate sum of OTHERS before the change, using normalized original values
+        other_sum_before_change = sum(v for k, v in original_numeric_shares.items() if k != changed_mode)
 
-        else: # changed_mode != DRIVE_KEY
-            # --- Non-Drive Mode Changed ---
-            if delta > 0: # Non-Drive Increased -> Reduce Drive ONLY
-                current_drive_share = original_numeric_shares.get(DRIVE_KEY, 0.0)
-                possible_drive_reduction = min(delta, current_drive_share)
-                final_new_value = original_numeric_shares[changed_mode] + possible_drive_reduction # Adjust target
-                working_shares[changed_mode] = final_new_value
-                working_shares[DRIVE_KEY] = current_drive_share - possible_drive_reduction
-                # Restore other non-drive modes to their original numeric values explicitly
-                for k in MODES:
-                    if k != changed_mode and k != DRIVE_KEY:
-                        working_shares[k] = original_numeric_shares[k]
+        if other_sum_before_change > 1e-9:
+            # Calculate the factor to adjust other modes.
+            # If delta > 0 (mode increased), factor is negative (others decrease).
+            # If delta < 0 (mode decreased), factor is positive (others increase).
+            adjustment_factor = -delta / other_sum_before_change
 
-            else: # Non-Drive Decreased (delta < 0) -> Increase Drive ONLY
-                current_drive_share = original_numeric_shares.get(DRIVE_KEY, 0.0)
-                increase_amount = abs(delta)
-                working_shares[DRIVE_KEY] = min(100.0, current_drive_share + increase_amount) # Clamp at 100
-                working_shares[changed_mode] = target_value # Set the decreased value
-                # Restore other non-drive modes to their original numeric values explicitly
-                for k in MODES:
-                    if k != changed_mode and k != DRIVE_KEY:
-                        working_shares[k] = original_numeric_shares[k]
+            # Apply proportional adjustment to all other modes
+            for k in working_shares:
+                if k != changed_mode:
+                    # Calculate the change amount for this 'other' mode based on its original share
+                    adjustment = original_numeric_shares[k] * adjustment_factor
+                    # Apply the adjustment, ensuring bounds (0-100)
+                    working_shares[k] = max(0.0, min(100.0, original_numeric_shares[k] + adjustment))
+        else:
+             # Edge case: If other sum is zero, cannot redistribute proportionally.
+             # The changed_mode has its target_value, others remain zero.
+             # Final balancing (Step 4) will handle ensuring sum is 100.
+             print(f"Warning: Sum of other modes is zero for {changed_mode}, cannot redistribute delta={delta} proportionally.")
+             # Ensure other modes are explicitly zero if they weren't already
+             for k in working_shares:
+                 if k != changed_mode:
+                     working_shares[k] = 0.0
 
     # --- Step 4: Final Balancing & Float Precision Cleanup ---
-    # Regardless of redistribution, ensure Drive balances the non-drive sum
-    final_shares = working_shares.copy() # Use the result of redistribution or initial cleanup
-    non_drive_sum = sum(v for k, v in final_shares.items() if k != DRIVE_KEY)
+    # This step ensures the final sum is exactly 100, primarily adjusting Drive.
+    # If Drive can't absorb the full difference, it adjusts the largest other mode.
+    final_shares = working_shares.copy()
+    current_sum = sum(final_shares.values())
+    final_diff = 100.0 - current_sum
 
-    if non_drive_sum > 100.0 + 1e-9: # Allow tiny overshoot initially
-         # Scale down non-drive modes if their sum is too high
-         scale_factor = 100.0 / non_drive_sum if non_drive_sum > 1e-9 else 0
-         non_drive_sum = 0.0
-         for mode in MODES:
-             if mode != DRIVE_KEY:
-                 final_shares[mode] *= scale_factor
-                 non_drive_sum += final_shares[mode]
-         final_shares[DRIVE_KEY] = 0.0 # Drive must be 0
-    else:
-        # Set Drive based on valid non_drive_sum, ensuring non-negative
-        final_shares[DRIVE_KEY] = max(0.0, 100.0 - non_drive_sum)
+    # Only adjust if the difference is significant
+    if abs(final_diff) > 1e-9:
+        # Prioritize adjusting Drive if it won't go out of 0-100 bounds
+        drive_share = final_shares.get(DRIVE_KEY, 0.0)
+        can_adjust_drive = (drive_share + final_diff >= -1e-9) and (drive_share + final_diff <= 100.0 + 1e-9)
 
-    # Final pass to correct tiny floating point sum errors to hit exactly 100
-    final_sum_check = sum(final_shares.values())
-    diff = 100.0 - final_sum_check
-    if abs(diff) > 1e-9:
-        # Prefer adjusting Drive if it has room, otherwise adjust largest share
         adjust_mode = DRIVE_KEY
-        # Check if Drive can absorb the difference without going below 0
-        if final_shares.get(DRIVE_KEY, 0.0) < abs(diff) and diff < 0 : # Need to add, but Drive is too small
-             # Find largest other mode to adjust
-             other_modes = {k:v for k,v in final_shares.items() if k != DRIVE_KEY}
+        if not can_adjust_drive:
+             # If Drive can't be adjusted, find the largest other mode to adjust
+             other_modes = {k:v for k,v in final_shares.items() if k != DRIVE_KEY and v > 1e-9} # Find non-zero others
              if other_modes:
                  adjust_mode = max(other_modes, key=other_modes.get)
-             # If only Drive exists (e.g., 99.9999), adjust_mode remains Drive
-        elif final_shares.get(DRIVE_KEY, 0.0) + diff > 100.0 : # Need to subtract, but Drive would go over 100 (shouldn't happen)
-             other_modes = {k:v for k,v in final_shares.items() if k != DRIVE_KEY}
-             if other_modes:
-                 adjust_mode = max(other_modes, key=other_modes.get)
-
+             # If only Drive exists or all others are zero, adjust_mode remains Drive
 
         if adjust_mode in final_shares:
-            final_shares[adjust_mode] += diff
-            # Final clamp after correction
-            final_shares[adjust_mode] = max(0.0, min(100.0, final_shares[adjust_mode]))
+             final_shares[adjust_mode] += final_diff
+             # Clamp the final adjusted value strictly between 0 and 100
+             final_shares[adjust_mode] = max(0.0, min(100.0, final_shares[adjust_mode]))
         else:
-            # This case should be very rare, indicates potentially all shares became zero
-            print(f"Warning: Could not find suitable mode to apply final sum correction.")
+             # This should be rare - indicates no mode could be adjusted
+             print(f"Warning: Could not find suitable mode ('{adjust_mode}') to apply final sum correction of {final_diff:.4f}.")
 
-    # Final check (for debugging)
-    # final_final_sum = sum(final_shares.values())
-    # if abs(100.0 - final_final_sum) > 1e-7:
-    #    print(f"ERROR: Final sum check failed significantly! Sum={final_final_sum:.5f}")
+    # Final check to ensure all values are non-negative after potential adjustments
+    for mode in final_shares:
+        if final_shares[mode] < 0:
+            final_shares[mode] = 0.0
+
+    # Ensure final sum is exactly 100 after clamping/adjustments
+    final_sum_check = sum(final_shares.values())
+    if abs(100.0 - final_sum_check) > 1e-7:
+       # If still not 100, apply remaining difference to Drive as last resort
+       final_diff_again = 100.0 - final_sum_check
+       final_shares[DRIVE_KEY] = max(0.0, min(100.0, final_shares.get(DRIVE_KEY, 0.0) + final_diff_again))
+       # print(f"Warning: Applied final correction {final_diff_again:.4f} to Drive after clamping.")
 
     return final_shares
 
@@ -190,7 +168,7 @@ def calculate_daily_trips(population_per_year, mode_shares):
     trips_per_mode_per_year = {mode: np.zeros(num_years) for mode in MODES}
     total_daily_trips_per_year = np.zeros(num_years)
     population_array = np.array(population_per_year)
-    annual_total_trips = population_array
+    annual_total_trips = population_array # Assuming 1 trip per person per year (adjust if needed)
     for i in range(num_years):
         daily_total_trips_year = annual_total_trips[i] / DAYS_PER_YEAR
         total_daily_trips_per_year[i] = daily_total_trips_year
@@ -218,9 +196,10 @@ def analyze_parking(population_per_year, mode_shares, parking_supply_per_year, p
         current_population = population_array[i]
         for mode, factor in PARKING_DEMAND_FACTORS_PER_PERSON.items():
             share_percentage = mode_shares.get(mode, 0.0)
-            share_fraction = share_percentage / 100.0
-            people_using_mode = current_population * share_fraction
-            current_year_demand += people_using_mode * factor
+            if share_percentage > 0: # Only calculate if share > 0
+                share_fraction = share_percentage / 100.0
+                people_using_mode = current_population * share_fraction
+                current_year_demand += people_using_mode * factor
         demand_per_year[i] = current_year_demand
     shortfall_per_year = np.maximum(0, demand_per_year - supply_array)
     cost_per_year = shortfall_per_year * parking_cost_per_space
