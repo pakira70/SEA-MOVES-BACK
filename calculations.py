@@ -1,8 +1,8 @@
-# SEA-MOVES-BACK/calculations.py - FINAL, CORRECTED SHUTTLE LOGIC V2
+# SEA-MOVES-BACK/calculations.py - PARKING LOGIC CORRECTED
 import numpy as np
 import math
 
-# --- (calculate_daily_trips, analyze_parking, create_summary_table remain the same) ---
+# --- (calculate_daily_trips and create_summary_table remain the same) ---
 
 def calculate_daily_trips(population_per_year, processed_mode_shares, show_rate_percent):
     num_years = len(population_per_year)
@@ -30,12 +30,24 @@ def analyze_parking(population_per_year, processed_mode_shares, parking_supply_p
                     parking_cost_per_space, show_rate_percent, active_mode_info):
     num_years = len(population_per_year)
     if num_years == 0: return [], [], []
+    
+    # --- BUG FIX START: The calculation logic is now iterative to handle cumulative supply ---
+    
     show_rate_fraction = show_rate_percent / 100.0
-    demand_per_year = np.zeros(num_years)
     population_array = np.array(population_per_year)
-    supply_array = np.array(parking_supply_per_year)
+    initial_supply_array = np.array(parking_supply_per_year)
     effective_population_per_year = population_array * show_rate_fraction
+
+    # Initialize lists to store results
+    demand_per_year_list = []
+    shortfall_per_year_list = []
+    cost_per_year_list = []
+    
+    # Track the supply as it grows year by year
+    cumulative_supply = initial_supply_array[0] if num_years > 0 else 0
+
     for i in range(num_years):
+        # 1. Calculate this year's total parking demand
         current_year_demand = 0.0
         current_effective_population = effective_population_per_year[i]
         for mode_key in processed_mode_shares.keys():
@@ -44,10 +56,22 @@ def analyze_parking(population_per_year, processed_mode_shares, parking_supply_p
                 share_fraction = processed_mode_shares.get(mode_key, 0.0) / 100.0
                 parking_factor = mode_info.get('parking_factor_per_person', 0.0)
                 current_year_demand += (current_effective_population * share_fraction * parking_factor)
-        demand_per_year[i] = current_year_demand
-    shortfall_per_year = np.maximum(0, demand_per_year - supply_array)
-    cost_per_year = shortfall_per_year * parking_cost_per_space
-    return demand_per_year.tolist(), shortfall_per_year.tolist(), cost_per_year.tolist()
+        
+        demand_per_year_list.append(current_year_demand)
+
+        # 2. Calculate shortfall against the CURRENT cumulative supply
+        current_shortfall = max(0, current_year_demand - cumulative_supply)
+        shortfall_per_year_list.append(current_shortfall)
+        
+        # 3. Calculate cost based ONLY on this year's shortfall
+        current_cost = current_shortfall * parking_cost_per_space
+        cost_per_year_list.append(current_cost)
+        
+        # 4. CRITICAL: Add newly built stalls to the cumulative supply for the next year
+        cumulative_supply += current_shortfall
+
+    return demand_per_year_list, shortfall_per_year_list, cost_per_year_list
+    # --- BUG FIX END ---
 
 def create_summary_table(years, population_per_year, total_daily_trips_per_year,
                          parking_demand_per_year, parking_supply_per_year, parking_shortfall_per_year):
